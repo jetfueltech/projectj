@@ -36,3 +36,19 @@ yarn-error.log*
 .vercel
 .vscode
 .env*.local
+
+# Build artifacts
+tsconfig.tsbuildinfo
+
+# Python
+python/.venv
+python/__pycache__
+python/**/__pycache__
+python/*.egg-info
+
+# Android
+mobile/.gradle
+mobile/build
+mobile/app/build
+mobile/local.properties
+mobile/.idea

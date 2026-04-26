@@ -5,19 +5,12 @@ import { signOut } from '@/app/(auth)/auth';
 export const SignOutForm = () => {
   return (
     <Form
-      className="w-full"
       action={async () => {
         'use server';
-
-        await signOut({
-          redirectTo: '/',
-        });
+        await signOut({ redirectTo: '/login' });
       }}
     >
-      <button
-        type="submit"
-        className="w-full text-left px-1 py-0.5 text-red-500"
-      >
+      <button type="submit" className="text-red-500 hover:underline">
         Sign out
       </button>
     </Form>

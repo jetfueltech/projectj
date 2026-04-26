@@ -6,110 +6,180 @@ import {
   json,
   uuid,
   text,
-  primaryKey,
-  foreignKey,
-  boolean,
+  integer,
+  doublePrecision,
 } from 'drizzle-orm/pg-core';
 
 export const user = pgTable('User', {
   id: uuid('id').primaryKey().notNull().defaultRandom(),
-  email: varchar('email', { length: 64 }).notNull(),
-  password: varchar('password', { length: 64 }),
+  email: varchar('email', { length: 128 }).notNull(),
+  password: varchar('password', { length: 128 }),
+  name: varchar('name', { length: 128 }),
+  company: varchar('company', { length: 128 }),
+  createdAt: timestamp('createdAt').notNull().defaultNow(),
 });
-
 export type User = InferSelectModel<typeof user>;
 
-export const chat = pgTable('Chat', {
+export const property = pgTable('Property', {
   id: uuid('id').primaryKey().notNull().defaultRandom(),
-  createdAt: timestamp('createdAt').notNull(),
-  title: text('title').notNull(),
   userId: uuid('userId')
     .notNull()
     .references(() => user.id),
-  visibility: varchar('visibility', { enum: ['public', 'private'] })
-    .notNull()
-    .default('private'),
+  customerName: varchar('customerName', { length: 128 }).notNull(),
+  customerPhone: varchar('customerPhone', { length: 32 }),
+  customerEmail: varchar('customerEmail', { length: 128 }),
+  addressLine1: varchar('addressLine1', { length: 256 }).notNull(),
+  addressLine2: varchar('addressLine2', { length: 256 }),
+  city: varchar('city', { length: 128 }).notNull(),
+  state: varchar('state', { length: 64 }).notNull(),
+  postalCode: varchar('postalCode', { length: 16 }).notNull(),
+  latitude: doublePrecision('latitude'),
+  longitude: doublePrecision('longitude'),
+  notes: text('notes'),
+  createdAt: timestamp('createdAt').notNull().defaultNow(),
 });
+export type Property = InferSelectModel<typeof property>;
 
-export type Chat = InferSelectModel<typeof chat>;
+export const jobStatusValues = [
+  'created',
+  'recon_capturing',
+  'recon_uploaded',
+  'recon_processing',
+  'mission_ready',
+  'mission_capturing',
+  'mission_uploaded',
+  'mission_processing',
+  'complete',
+  'failed',
+] as const;
+export type JobStatus = (typeof jobStatusValues)[number];
 
-export const message = pgTable('Message', {
+export const job = pgTable('Job', {
   id: uuid('id').primaryKey().notNull().defaultRandom(),
-  chatId: uuid('chatId')
+  propertyId: uuid('propertyId')
     .notNull()
-    .references(() => chat.id),
-  role: varchar('role').notNull(),
-  content: json('content').notNull(),
-  createdAt: timestamp('createdAt').notNull(),
+    .references(() => property.id),
+  userId: uuid('userId')
+    .notNull()
+    .references(() => user.id),
+  status: varchar('status', { enum: jobStatusValues })
+    .notNull()
+    .default('created'),
+  droneSerial: varchar('droneSerial', { length: 64 }),
+  droneModel: varchar('droneModel', { length: 64 }),
+  errorMessage: text('errorMessage'),
+  createdAt: timestamp('createdAt').notNull().defaultNow(),
+  updatedAt: timestamp('updatedAt').notNull().defaultNow(),
 });
+export type Job = InferSelectModel<typeof job>;
 
-export type Message = InferSelectModel<typeof message>;
+export const imageKindValues = ['recon', 'mission', 'orthomosaic'] as const;
 
-export const vote = pgTable(
-  'Vote',
-  {
-    chatId: uuid('chatId')
-      .notNull()
-      .references(() => chat.id),
-    messageId: uuid('messageId')
-      .notNull()
-      .references(() => message.id),
-    isUpvoted: boolean('isUpvoted').notNull(),
-  },
-  (table) => {
-    return {
-      pk: primaryKey({ columns: [table.chatId, table.messageId] }),
-    };
-  },
-);
+export const image = pgTable('Image', {
+  id: uuid('id').primaryKey().notNull().defaultRandom(),
+  jobId: uuid('jobId')
+    .notNull()
+    .references(() => job.id),
+  kind: varchar('kind', { enum: imageKindValues }).notNull(),
+  blobUrl: text('blobUrl').notNull(),
+  filename: varchar('filename', { length: 256 }),
+  width: integer('width'),
+  height: integer('height'),
+  // EXIF / telemetry captured by the drone at shutter
+  latitude: doublePrecision('latitude'),
+  longitude: doublePrecision('longitude'),
+  altitude: doublePrecision('altitude'),
+  yaw: doublePrecision('yaw'),
+  pitch: doublePrecision('pitch'),
+  roll: doublePrecision('roll'),
+  gimbalPitch: doublePrecision('gimbalPitch'),
+  capturedAt: timestamp('capturedAt'),
+  createdAt: timestamp('createdAt').notNull().defaultNow(),
+});
+export type Image = InferSelectModel<typeof image>;
 
-export type Vote = InferSelectModel<typeof vote>;
+// Output of the recon-stage Python pipeline: roof planes, obstacles, ridge lines.
+export const roofPlane = pgTable('RoofPlane', {
+  id: uuid('id').primaryKey().notNull().defaultRandom(),
+  jobId: uuid('jobId')
+    .notNull()
+    .references(() => job.id),
+  // GeoJSON polygon in WGS84
+  polygon: json('polygon').notNull(),
+  areaSqFt: doublePrecision('areaSqFt'),
+  pitchDegrees: doublePrecision('pitchDegrees'),
+  azimuthDegrees: doublePrecision('azimuthDegrees'),
+  ridgeHeightM: doublePrecision('ridgeHeightM'),
+  eaveHeightM: doublePrecision('eaveHeightM'),
+});
+export type RoofPlane = InferSelectModel<typeof roofPlane>;
 
-export const document = pgTable(
-  'Document',
-  {
-    id: uuid('id').notNull().defaultRandom(),
-    createdAt: timestamp('createdAt').notNull(),
-    title: text('title').notNull(),
-    content: text('content'),
-    kind: varchar('text', { enum: ['text', 'code'] })
-      .notNull()
-      .default('text'),
-    userId: uuid('userId')
-      .notNull()
-      .references(() => user.id),
-  },
-  (table) => {
-    return {
-      pk: primaryKey({ columns: [table.id, table.createdAt] }),
-    };
-  },
-);
+export const obstacle = pgTable('Obstacle', {
+  id: uuid('id').primaryKey().notNull().defaultRandom(),
+  jobId: uuid('jobId')
+    .notNull()
+    .references(() => job.id),
+  kind: varchar('kind', { length: 32 }).notNull(), // tree, chimney, antenna, vent, etc.
+  geometry: json('geometry').notNull(), // GeoJSON
+  heightM: doublePrecision('heightM'),
+});
+export type Obstacle = InferSelectModel<typeof obstacle>;
 
-export type Document = InferSelectModel<typeof document>;
+// Waypoint mission generated by the Python planner; consumed by the Android app.
+export const waypoint = pgTable('Waypoint', {
+  id: uuid('id').primaryKey().notNull().defaultRandom(),
+  jobId: uuid('jobId')
+    .notNull()
+    .references(() => job.id),
+  ordering: integer('ordering').notNull(),
+  latitude: doublePrecision('latitude').notNull(),
+  longitude: doublePrecision('longitude').notNull(),
+  altitudeM: doublePrecision('altitudeM').notNull(),
+  headingDeg: doublePrecision('headingDeg'),
+  gimbalPitchDeg: doublePrecision('gimbalPitchDeg'),
+  speedMs: doublePrecision('speedMs').default(4),
+  action: varchar('action', { length: 32 }).default('shoot_photo'),
+});
+export type Waypoint = InferSelectModel<typeof waypoint>;
 
-export const suggestion = pgTable(
-  'Suggestion',
-  {
-    id: uuid('id').notNull().defaultRandom(),
-    documentId: uuid('documentId').notNull(),
-    documentCreatedAt: timestamp('documentCreatedAt').notNull(),
-    originalText: text('originalText').notNull(),
-    suggestedText: text('suggestedText').notNull(),
-    description: text('description'),
-    isResolved: boolean('isResolved').notNull().default(false),
-    userId: uuid('userId')
-      .notNull()
-      .references(() => user.id),
-    createdAt: timestamp('createdAt').notNull(),
-  },
-  (table) => ({
-    pk: primaryKey({ columns: [table.id] }),
-    documentRef: foreignKey({
-      columns: [table.documentId, table.documentCreatedAt],
-      foreignColumns: [document.id, document.createdAt],
-    }),
-  }),
-);
+export const damageTypeValues = [
+  'missing_shingle',
+  'cracked_shingle',
+  'curling',
+  'hail_impact',
+  'granule_loss',
+  'flashing_damage',
+  'debris',
+  'moss',
+  'punctured',
+  'other',
+] as const;
+export type DamageType = (typeof damageTypeValues)[number];
 
-export type Suggestion = InferSelectModel<typeof suggestion>;
+export const damage = pgTable('Damage', {
+  id: uuid('id').primaryKey().notNull().defaultRandom(),
+  jobId: uuid('jobId')
+    .notNull()
+    .references(() => job.id),
+  imageId: uuid('imageId').references(() => image.id),
+  planeId: uuid('planeId').references(() => roofPlane.id),
+  type: varchar('type', { enum: damageTypeValues }).notNull(),
+  severity: integer('severity').notNull(), // 1-5
+  confidence: doublePrecision('confidence'),
+  bbox: json('bbox'), // [x, y, w, h] in pixels
+  geo: json('geo'), // GeoJSON point/polygon in WGS84 (when geo-referenced)
+  notes: text('notes'),
+});
+export type Damage = InferSelectModel<typeof damage>;
+
+export const report = pgTable('Report', {
+  id: uuid('id').primaryKey().notNull().defaultRandom(),
+  jobId: uuid('jobId')
+    .notNull()
+    .references(() => job.id),
+  pdfUrl: text('pdfUrl'),
+  summary: text('summary'),
+  totals: json('totals'), // { damages: n, severityAvg, areaSqFt, planes: n }
+  createdAt: timestamp('createdAt').notNull().defaultNow(),
+});
+export type Report = InferSelectModel<typeof report>;

@@ -1,61 +1,76 @@
-<a href="https://chat.vercel.ai/">
-  <img alt="Next.js 14 and App Router-ready AI chatbot." src="app/(chat)/opengraph-image.png">
-  <h1 align="center">Next.js AI Chatbot</h1>
-</a>
+# Roof Recon
 
-<p align="center">
-  An Open-Source AI Chatbot Template Built With Next.js and the AI SDK by Vercel.
-</p>
+Drone-based roof inspection platform built around DJI's Mobile SDK.
 
-<p align="center">
-  <a href="#features"><strong>Features</strong></a> ·
-  <a href="#model-providers"><strong>Model Providers</strong></a> ·
-  <a href="#deploy-your-own"><strong>Deploy Your Own</strong></a> ·
-  <a href="#running-locally"><strong>Running locally</strong></a>
-</p>
-<br/>
+The system covers the full roofing-contractor workflow:
 
-## Features
+| Step | Component | Notes |
+| --- | --- | --- |
+| 1. Roofer enters property info | `web/` (Next.js) | `/properties/new` |
+| 2. App connects to drone | `mobile/` | DJI MSDK v5, Android |
+| 3. Recon flight | `mobile/` | Manual or automated orbit |
+| 4. Images upload to backend | `mobile/` -> `/api/mobile/jobs/:id/images` | Multipart with EXIF/telemetry |
+| 5. Detect roof planes/obstacles | `python/` | `app/modules/plane_detection.py` |
+| 6. Generate roof-specific waypoint grid | `python/` | `app/modules/waypoints.py` (real boustrophedon planner) |
+| 7. App sends waypoint mission to DJI SDK | `mobile/` | WPML KMZ via `MissionKmzBuilder` |
+| 8. Drone captures images | `mobile/` | Auto mission, photo at each waypoint |
+| 9. Stitch orthomosaic | `python/` | `app/modules/orthomosaic.py` (stub -> swap for ODM) |
+| 10. Detect damage | `python/` | `app/modules/damage_detection.py` (Claude vision today) |
+| 11. Generate report | `python/` -> `web/` | `/jobs/:id/report` |
 
-- [Next.js](https://nextjs.org) App Router
-  - Advanced routing for seamless navigation and performance
-  - React Server Components (RSCs) and Server Actions for server-side rendering and increased performance
-- [AI SDK](https://sdk.vercel.ai/docs)
-  - Unified API for generating text, structured objects, and tool calls with LLMs
-  - Hooks for building dynamic chat and generative user interfaces
-  - Supports OpenAI (default), Anthropic, Cohere, and other model providers
-- [shadcn/ui](https://ui.shadcn.com)
-  - Styling with [Tailwind CSS](https://tailwindcss.com)
-  - Component primitives from [Radix UI](https://radix-ui.com) for accessibility and flexibility
-- Data Persistence
-  - [Vercel Postgres powered by Neon](https://vercel.com/storage/postgres) for saving chat history and user data
-  - [Vercel Blob](https://vercel.com/storage/blob) for efficient file storage
-- [NextAuth.js](https://github.com/nextauthjs/next-auth)
-  - Simple and secure authentication
+## Repo layout
 
-## Model Providers
-
-This template ships with OpenAI `gpt-4o` as the default. However, with the [AI SDK](https://sdk.vercel.ai/docs), you can switch LLM providers to [OpenAI](https://openai.com), [Anthropic](https://anthropic.com), [Cohere](https://cohere.com/), and [many more](https://sdk.vercel.ai/providers/ai-sdk-providers) with just a few lines of code.
-
-## Deploy Your Own
-
-You can deploy your own version of the Next.js AI Chatbot to Vercel with one click:
-
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fvercel%2Fai-chatbot&env=AUTH_SECRET,OPENAI_API_KEY&envDescription=Learn%20more%20about%20how%20to%20get%20the%20API%20Keys%20for%20the%20application&envLink=https%3A%2F%2Fgithub.com%2Fvercel%2Fai-chatbot%2Fblob%2Fmain%2F.env.example&demo-title=AI%20Chatbot&demo-description=An%20Open-Source%20AI%20Chatbot%20Template%20Built%20With%20Next.js%20and%20the%20AI%20SDK%20by%20Vercel.&demo-url=https%3A%2F%2Fchat.vercel.ai&stores=[{%22type%22:%22postgres%22},{%22type%22:%22blob%22}])
+```
+.
+├── app/                Next.js App Router (web dashboard + REST API)
+├── components/         shadcn/ui + app-specific components
+├── lib/db, lib/auth    Drizzle schema/queries, mobile JWT, internal-secret check
+├── lib/processing      Trigger client for the Python service
+├── python/             FastAPI worker (steps 5, 6, 9, 10, 11)
+└── mobile/             Android Kotlin app (DJI MSDK v5)
+```
 
 ## Running locally
 
-You will need to use the environment variables [defined in `.env.example`](.env.example) to run Next.js AI Chatbot. It's recommended you use [Vercel Environment Variables](https://vercel.com/docs/projects/environment-variables) for this, but a `.env` file is all that is necessary.
-
-> Note: You should not commit your `.env` file or it will expose secrets that will allow others to control access to your various OpenAI and authentication provider accounts.
-
-1. Install Vercel CLI: `npm i -g vercel`
-2. Link local instance with Vercel and GitHub accounts (creates `.vercel` directory): `vercel link`
-3. Download your environment variables: `vercel env pull`
-
 ```bash
+# 1. Web
+cp .env.example .env.local
 pnpm install
-pnpm dev
+pnpm db:generate && pnpm db:migrate
+pnpm dev    # http://localhost:3000
+
+# 2. Python
+cd python
+cp .env.example .env
+pip install -e .
+uvicorn app.main:app --reload --port 8000
+
+# 3. Android
+cd mobile
+./gradlew assembleDebug \
+    -PbackendUrl=http://10.0.2.2:3000 \
+    -PdjiAppKey=YOUR_DJI_APP_KEY
 ```
 
-Your app template should now be running on [localhost:3000](http://localhost:3000/).
+`AUTH_SECRET`, `INTERNAL_SECRET`, and `POSTGRES_URL` need values before the
+web app will boot. The mobile app additionally needs a DJI developer account
+to mint an app key.
+
+## Environment
+
+Web (`.env.local`):
+* `AUTH_SECRET` — signs both web sessions and mobile JWTs.
+* `POSTGRES_URL`, `BLOB_READ_WRITE_TOKEN` — data + image storage.
+* `PYTHON_SERVICE_URL` — base URL the web app POSTs to when triggering processing.
+* `INTERNAL_SECRET` — shared with `python/.env`; used for the web ↔ python callbacks.
+
+Python (`python/.env`):
+* `WEB_API_URL` — pointed at the Next.js deployment.
+* `INTERNAL_SECRET` — same value as the web side.
+* `ANTHROPIC_API_KEY` — used by the damage-detection module.
+
+## Stubs that need real implementations before flying
+
+See per-component READMEs:
+* `python/README.md` — plane detection, orthomosaic stitching, PDF report.
+* `mobile/README.md` — DJI capture/mission execution wiring.

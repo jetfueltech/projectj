@@ -1,0 +1,27 @@
+[project]
+name = "roof-recon-processor"
+version = "0.1.0"
+description = "Drone roof inspection processing service: roof plane detection, waypoint planning, orthomosaic stitching, damage detection."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.2",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    "shapely>=2.0",
+    "pyproj>=3.6",
+    "Pillow>=10.2",
+    "exifread>=3.0",
+    "anthropic>=0.40",
+    "reportlab>=4.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.1", "ruff>=0.4"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -6,34 +6,28 @@ export const authConfig = {
     newUser: '/',
   },
   providers: [
-    // added later in auth.ts since it requires bcrypt which is only compatible with Node.js
-    // while this file is also used in non-Node.js environments
+    // added in auth.ts (bcrypt requires Node.js)
   ],
   callbacks: {
     authorized({ auth, request: { nextUrl } }) {
       const isLoggedIn = !!auth?.user;
-      const isOnChat = nextUrl.pathname.startsWith('/');
-      const isOnRegister = nextUrl.pathname.startsWith('/register');
-      const isOnLogin = nextUrl.pathname.startsWith('/login');
+      const path = nextUrl.pathname;
+      const isAuthPage = path.startsWith('/login') || path.startsWith('/register');
+      // Mobile API uses bearer auth, not the web session.
+      const isMobileApi = path.startsWith('/api/mobile');
+      // Internal callbacks from the Python service authenticate via shared secret.
+      const isInternalApi = path.startsWith('/api/internal');
 
-      if (isLoggedIn && (isOnLogin || isOnRegister)) {
-        return Response.redirect(new URL('/', nextUrl as unknown as URL));
+      if (isMobileApi || isInternalApi) return true;
+
+      if (isAuthPage) {
+        if (isLoggedIn) {
+          return Response.redirect(new URL('/', nextUrl as unknown as URL));
+        }
+        return true;
       }
 
-      if (isOnRegister || isOnLogin) {
-        return true; // Always allow access to register and login pages
-      }
-
-      if (isOnChat) {
-        if (isLoggedIn) return true;
-        return false; // Redirect unauthenticated users to login page
-      }
-
-      if (isLoggedIn) {
-        return Response.redirect(new URL('/', nextUrl as unknown as URL));
-      }
-
-      return true;
+      return isLoggedIn;
     },
   },
 } satisfies NextAuthConfig;
