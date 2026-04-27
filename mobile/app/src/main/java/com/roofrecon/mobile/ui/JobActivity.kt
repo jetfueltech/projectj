@@ -17,26 +17,35 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.compose.runtime.rememberCoroutineScope
 import com.roofrecon.mobile.auth.SessionStore
 import com.roofrecon.mobile.dji.DroneController
+import com.roofrecon.mobile.dji.MediaSync
 import com.roofrecon.mobile.net.BackendClient
 import com.roofrecon.mobile.net.JobDetailResponse
 import com.roofrecon.mobile.net.StatusUpdate
+import com.roofrecon.mobile.upload.ImageUploader
+import dji.v5.manager.aircraft.waypoint3.WaypointMissionExecuteState
 import kotlinx.coroutines.launch
+import java.util.Date
 
 /**
- * Per-job control surface. From here a roofer:
+ * Per-job control surface. Runs both autonomous flights end-to-end:
  *
- *   1. Triggers the recon flight (manual or automated orbit).
- *   2. Watches for the backend status to flip to `mission_ready` (we poll
- *      every few seconds — could be replaced with SSE/Push).
- *   3. Pushes the planned mission to the aircraft and starts the auto flight.
- *   4. Watches mission upload progress as photos stream off the SD card.
+ *   Recon: orbit waypoints (seeded by the web app from the property's GPS)
+ *          -> uploadMission -> runMission -> MediaSync -> status flips to
+ *          recon_uploaded. The user then taps "Process recon" on the web
+ *          dashboard, which dispatches the Python planner. When the planner
+ *          callbacks complete, status flips to mission_ready and the
+ *          waypoints in the backend are now the mission grid.
+ *
+ *   Mission: same flow with the new (grid) waypoints. After upload, the user
+ *            triggers "Process mission" on the web side, which kicks off
+ *            stitching + damage detection + report.
  */
 class JobActivity : ComponentActivity() {
 
@@ -59,7 +68,11 @@ private fun JobScreen(modifier: Modifier, jobId: String) {
     val token = remember { SessionStore.token(ctx)!! }
     val scope = rememberCoroutineScope()
     val drone = remember { DroneController() }
+    val uploader = remember { ImageUploader(token) }
+    val mediaSync = remember { MediaSync(ctx, uploader) }
+
     var detail by remember { mutableStateOf<JobDetailResponse?>(null) }
+    var phase by remember { mutableStateOf("idle") }
     var error by remember { mutableStateOf<String?>(null) }
 
     suspend fun refresh() {
@@ -67,6 +80,48 @@ private fun JobScreen(modifier: Modifier, jobId: String) {
             detail = BackendClient.api.getJob(BackendClient.bearer(token), jobId)
         } catch (e: Exception) {
             error = e.message
+        }
+    }
+
+    suspend fun setStatus(status: String, errorMessage: String? = null) {
+        BackendClient.api.updateStatus(
+            BackendClient.bearer(token), jobId,
+            StatusUpdate(status = status, errorMessage = errorMessage),
+        )
+    }
+
+    suspend fun runFlight(
+        kind: ImageUploader.Kind,
+        capturingStatus: String,
+        uploadedStatus: String,
+    ) {
+        val wps = detail?.waypoints.orEmpty()
+        if (wps.isEmpty()) {
+            error = "no waypoints loaded for this job"
+            return
+        }
+        try {
+            val takeoff = Date()
+            phase = "uploading mission"
+            setStatus(capturingStatus)
+            val missionName = drone.uploadMission(jobId, wps)
+
+            phase = "flying"
+            val state = drone.runMission(missionName)
+            if (state != WaypointMissionExecuteState.FINISHED) {
+                throw DroneController.DjiException("mission ended in $state")
+            }
+
+            phase = "downloading photos"
+            mediaSync.pullAndUpload(jobId, kind, takeoff)
+
+            setStatus(uploadedStatus)
+            phase = "idle"
+            refresh()
+        } catch (e: Exception) {
+            error = e.message
+            phase = "idle"
+            try { setStatus("failed", e.message) } catch (_: Exception) {}
         }
     }
 
@@ -79,47 +134,42 @@ private fun JobScreen(modifier: Modifier, jobId: String) {
         Text("Job ${jobId.take(8)}", style = MaterialTheme.typography.titleLarge)
         Text("Status: ${detail?.job?.status ?: "loading…"}")
         Text("Property: ${detail?.property?.customerName ?: "—"}")
-        Text("Waypoints planned: ${detail?.waypoints?.size ?: 0}")
+        Text("Waypoints loaded: ${detail?.waypoints?.size ?: 0}")
+        if (phase != "idle") Text("Phase: $phase")
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
+        val status = detail?.job?.status
         Button(
+            enabled = status == "created" && (detail?.waypoints?.isNotEmpty() == true),
             onClick = {
                 scope.launch {
-                    BackendClient.api.updateStatus(
-                        BackendClient.bearer(token), jobId,
-                        StatusUpdate(status = "recon_capturing"),
+                    runFlight(
+                        ImageUploader.Kind.RECON,
+                        capturingStatus = "recon_capturing",
+                        uploadedStatus = "recon_uploaded",
                     )
-                    // TODO: hand off to a recon-flight Activity that captures
-                    // ~20 photos around the property at 35-50m and uploads each.
-                    BackendClient.api.updateStatus(
-                        BackendClient.bearer(token), jobId,
-                        StatusUpdate(status = "recon_uploaded"),
-                    )
-                    refresh()
                 }
             },
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("Run recon flight") }
+        ) { Text("Run recon orbit") }
 
         Button(
-            enabled = detail?.waypoints?.isNotEmpty() == true,
+            enabled = status == "mission_ready",
             onClick = {
                 scope.launch {
-                    val wps = detail!!.waypoints
-                    BackendClient.api.updateStatus(
-                        BackendClient.bearer(token), jobId,
-                        StatusUpdate(status = "mission_capturing"),
+                    runFlight(
+                        ImageUploader.Kind.MISSION,
+                        capturingStatus = "mission_capturing",
+                        uploadedStatus = "mission_uploaded",
                     )
-                    drone.uploadMission(jobId, wps)
-                    drone.runMission(jobId)
-                    BackendClient.api.updateStatus(
-                        BackendClient.bearer(token), jobId,
-                        StatusUpdate(status = "mission_uploaded"),
-                    )
-                    refresh()
                 }
             },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Run mission flight") }
+
+        Button(
+            onClick = { drone.returnHome() },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Return to home") }
     }
 }

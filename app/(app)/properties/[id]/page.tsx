@@ -8,7 +8,9 @@ import {
   createJob,
   getProperty,
   listJobsForProperty,
+  replaceWaypoints,
 } from '@/lib/db/queries';
+import { generateOrbit } from '@/lib/processing/orbit';
 import { formatDate, statusLabel } from '@/lib/utils';
 
 async function startJobAction(formData: FormData) {
@@ -16,11 +18,24 @@ async function startJobAction(formData: FormData) {
   const session = await auth();
   if (!session?.user) redirect('/login');
 
+  const userId = session.user.id as string;
   const propertyId = String(formData.get('propertyId'));
-  const job = await createJob({
-    userId: session.user.id as string,
-    propertyId,
-  });
+  const property = await getProperty(propertyId, userId);
+
+  const job = await createJob({ userId, propertyId });
+
+  // Seed recon orbit waypoints if we have a property location. The mobile
+  // app fetches these before takeoff and flies the orbit autonomously.
+  // After recon processing, replaceWaypoints overwrites these with the
+  // mission grid produced by the Python planner.
+  if (property?.latitude != null && property?.longitude != null) {
+    const orbit = generateOrbit({
+      centerLat: property.latitude,
+      centerLng: property.longitude,
+    });
+    await replaceWaypoints(job.id, orbit);
+  }
+
   redirect(`/jobs/${job.id}`);
 }
 

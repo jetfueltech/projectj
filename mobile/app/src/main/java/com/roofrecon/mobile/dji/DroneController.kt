@@ -2,65 +2,127 @@ package com.roofrecon.mobile.dji
 
 import android.util.Log
 import com.roofrecon.mobile.net.Waypoint
-import dji.sdk.keyvalue.value.common.LocationCoordinate2D
-import dji.sdk.keyvalue.value.flightcontroller.FCGoHomeState
 import dji.v5.common.callback.CommonCallbacks
 import dji.v5.common.error.IDJIError
+import dji.v5.manager.aircraft.waypoint3.WaypointMissionExecuteState
+import dji.v5.manager.aircraft.waypoint3.WaypointMissionExecuteStateListener
 import dji.v5.manager.aircraft.waypoint3.WaypointMissionManager
-import dji.v5.manager.aircraft.waypoint3.model.WaypointMissionExecuteState
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.io.File
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /**
- * Thin façade over the bits of DJI MSDK v5 we use for inspections.
+ * Drives DJI MSDK v5 mission execution end-to-end.
  *
- * Two flights happen per job:
- *   1. Recon flight — a manually piloted or automated orbit so the Python
- *      service can build a coarse 3D model and pick the roof polygon. The app
- *      just needs to capture photos with full EXIF/telemetry.
- *   2. Mission flight — execute the waypoint grid produced by the planner,
- *      shooting one photo per waypoint at -90° gimbal.
+ *   uploadMission  -> WaypointMissionManager.pushKMZFileToAircraft
+ *   runMission     -> WaypointMissionManager.startMission + state listener
  *
- * The implementations below are intentionally skeletal — they show the public
- * shape and document the hooks. Wire each TODO to the corresponding
- * `KeyManager`/`CameraManager`/`WaypointMissionManager` calls once you can
- * test against a real aircraft.
+ * Both stages of the inspection (recon orbit, mission grid) share the same
+ * code path — the only difference is the waypoint set the planner produced.
+ *
+ * Targets MSDK 5.8.x; if you upgrade, double-check the listener interface
+ * name and the WaypointMissionExecuteState enum members.
  */
 class DroneController {
 
-    /** Trigger a single still capture. Returns the path of the saved file on the SD card. */
-    suspend fun capturePhoto(): String = suspendCancellableCoroutine { cont ->
-        // TODO: KeyManager.getInstance().performAction(KeyTools.createKey(CameraKey.KeyStartShootPhoto)) ...
-        Log.w(TAG, "capturePhoto() not yet implemented; returning placeholder path")
-        cont.resume("/sdcard/DCIM/placeholder.jpg")
-    }
-
-    /** Convert our backend Waypoint list to a KMZ mission file and upload it to the aircraft. */
-    suspend fun uploadMission(jobId: String, waypoints: List<Waypoint>) {
+    /**
+     * Build a WPML KMZ from `waypoints`, push it to the aircraft, and resume
+     * once the upload completes. The mission filename returned is what
+     * [runMission] expects (without the `.kmz` extension, matching the file
+     * name on the aircraft's filesystem).
+     */
+    suspend fun uploadMission(jobId: String, waypoints: List<Waypoint>): String {
+        require(waypoints.isNotEmpty()) { "no waypoints to upload" }
         val kmz = MissionKmzBuilder.build(jobId, waypoints)
-        Log.i(TAG, "uploadMission: ${waypoints.size} waypoints, ${kmz.length()} bytes")
-        // TODO: WaypointMissionManager.getInstance().pushKMZFileToAircraft(kmz.absolutePath, callback)
-    }
+        val missionName = kmz.nameWithoutExtension
 
-    /** Start the previously-uploaded waypoint mission and suspend until completion. */
-    suspend fun runMission(jobId: String): WaypointMissionExecuteState =
-        suspendCancellableCoroutine { cont ->
-            val mgr = WaypointMissionManager.getInstance()
-            // TODO: mgr.startMission(jobId, object : CommonCallbacks.CompletionCallback { ... })
-            // TODO: register a WaypointMissionExecutionListener and resume the continuation
-            //       on FINISHED / failed states.
-            Log.w(TAG, "runMission() not yet implemented")
-            cont.resumeWithException(NotImplementedError("DJI mission execution not wired"))
+        suspendCancellableCoroutine<Unit> { cont ->
+            WaypointMissionManager.getInstance().pushKMZFileToAircraft(
+                kmz.absolutePath,
+                object : CommonCallbacks.CompletionCallbackWithProgress<Double> {
+                    override fun onSuccess() {
+                        Log.i(TAG, "mission upload complete: $missionName")
+                        if (cont.isActive) cont.resume(Unit)
+                    }
+
+                    override fun onProgressUpdate(progress: Double) {
+                        Log.d(TAG, "mission upload ${(progress * 100).toInt()}%")
+                    }
+
+                    override fun onFailure(error: IDJIError) {
+                        Log.e(TAG, "mission upload failed: $error")
+                        if (cont.isActive) cont.resumeWithException(
+                            DjiException("upload failed: $error"),
+                        )
+                    }
+                },
+            )
         }
 
-    /** Best-effort RTH fallback. */
-    fun returnHome() {
-        // TODO: KeyManager.getInstance().performAction(KeyTools.createKey(FlightControllerKey.KeyStartGoHome))
-        Log.i(TAG, "Return-to-home requested")
+        return missionName
     }
 
-    fun homeLocation(): LocationCoordinate2D? = null // TODO: read FlightControllerKey.KeyHomeLocation
+    /**
+     * Start the previously-uploaded mission and suspend until the aircraft
+     * reports a terminal state. Resumes with the final state.
+     */
+    suspend fun runMission(missionName: String): WaypointMissionExecuteState =
+        suspendCancellableCoroutine { cont ->
+            val mgr = WaypointMissionManager.getInstance()
+
+            val listener = object : WaypointMissionExecuteStateListener {
+                override fun onMissionStateUpdate(state: WaypointMissionExecuteState) {
+                    Log.d(TAG, "mission state: $state")
+                    when (state) {
+                        WaypointMissionExecuteState.FINISHED -> finish(state)
+                        WaypointMissionExecuteState.FAILED -> finish(state)
+                        WaypointMissionExecuteState.NOT_SUPPORTED -> finish(state)
+                        else -> Unit
+                    }
+                }
+
+                private fun finish(state: WaypointMissionExecuteState) {
+                    mgr.removeWaypointMissionExecuteStateListener(this)
+                    if (cont.isActive) cont.resume(state)
+                }
+            }
+            mgr.addWaypointMissionExecuteStateListener(listener)
+
+            mgr.startMission(missionName, object : CommonCallbacks.CompletionCallback {
+                override fun onSuccess() {
+                    Log.i(TAG, "mission $missionName started")
+                }
+
+                override fun onFailure(error: IDJIError) {
+                    Log.e(TAG, "mission start failed: $error")
+                    mgr.removeWaypointMissionExecuteStateListener(listener)
+                    if (cont.isActive) cont.resumeWithException(
+                        DjiException("start failed: $error"),
+                    )
+                }
+            })
+
+            cont.invokeOnCancellation {
+                mgr.removeWaypointMissionExecuteStateListener(listener)
+                mgr.stopMission(missionName, NoopCallback)
+            }
+        }
+
+    /** Best-effort RTH fallback if the user aborts mid-flight. */
+    fun returnHome() {
+        // KeyManager.getInstance().performAction(
+        //     KeyTools.createKey(FlightControllerKey.KeyStartGoHome), null
+        // )
+        Log.i(TAG, "RTH requested")
+    }
+
+    private object NoopCallback : CommonCallbacks.CompletionCallback {
+        override fun onSuccess() {}
+        override fun onFailure(error: IDJIError) {}
+    }
+
+    class DjiException(message: String) : RuntimeException(message)
 
     companion object {
         private const val TAG = "DroneController"
